@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: poetry
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      # Ruff comes from the lockfile, so `format --check` matches local output
+      # exactly (no separate version pin to drift). Bump via `poetry update ruff`.
+      - name: Ruff lint
+        run: poetry run ruff check felix tests
+
+      - name: Ruff format check
+        run: poetry run ruff format --check felix tests
+
+  test:
+    name: Test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: poetry
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      # `felix --help` imports the whole CLI tree (all imports live at module
+      # top), so this also validates that the import graph resolves cleanly.
+      - name: Smoke test CLI
+        run: poetry run felix --help
+
+      # Tests are offline by design (httpx.MockTransport) — no agent-forge or
+      # network access required in CI.
+      - name: Run tests
+        run: poetry run pytest -q
+
+  build:
+    name: Build & verify wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Build wheel + sdist
+        run: pipx run build
+
+      - name: Verify wheel installs + CLI runs
+        run: |
+          python -m venv /tmp/verify
+          /tmp/verify/bin/pip install dist/*.whl
+          /tmp/verify/bin/felix --help
+
+      - name: Inspect artifact contents
+        run: |
+          ls -la dist/
+          python -c "import glob, zipfile; z = zipfile.ZipFile(glob.glob('dist/*.whl')[0]); print('\n'.join(z.namelist()[:25]))"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: felix-dist-${{ github.sha }}
+          path: dist/
+          retention-days: 7
+
+  ci-summary:
+    name: CI Summary
+    needs: [lint, test, build]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## CI Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Job | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Lint & Format | ${{ needs.lint.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Test | ${{ needs.test.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Build & verify wheel | ${{ needs.build.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ needs.lint.result }}" = "success" ] && [ "${{ needs.test.result }}" = "success" ] && [ "${{ needs.build.result }}" = "success" ]; then
+            echo "All CI checks passed." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Some CI checks failed — see the jobs above." >> "$GITHUB_STEP_SUMMARY"
+          fi

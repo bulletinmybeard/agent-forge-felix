@@ -1,0 +1,24 @@
+# Skill fleet sources — curated GitHub repos of Agent Skills (SKILL.md format).
+# `felix skills pull` fetches each enabled repo, discovers SKILL.md files, and
+# normalizes them into the catalog. Add system/ops-relevant repos from
+# https://www.skills.sh/ (install hints are `npx skills add owner/repo`).
+#
+# Per-source options:
+#   repo:     "owner/name" (required)
+#   ref:      branch/tag/commit (default HEAD)
+#   subdir:   restrict discovery to a path inside the repo
+#   include:  glob(s) on the skill folder path (relative to subdir) to keep
+#   exclude:  glob(s) to drop
+#   enabled:  false to skip without deleting the entry
+
+sources:
+  # Anthropic's public Agent Skills repository (document/, etc.).
+  - repo: anthropics/skills
+    ref: main
+    enabled: true
+
+  # --- Extend with system/ops skill repos (enable as you curate) ---
+  # - repo: owner/devops-skills
+  #   subdir: skills
+  #   include: ["linux-*", "docker-*", "networking-*", "systemd-*"]
+  #   enabled: true

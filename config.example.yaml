@@ -1,0 +1,51 @@
+# Felix client config. Copy this file to ~/.felix/config.yaml (or set FELIX_CONFIG).
+# Every field has a default and env overrides always win (FELIX_API_BASE, FELIX_WS_URL, FELIX_API_KEY).
+
+api_base: http://localhost:8200
+# ws_url is derived from api_base if omitted (https -> wss, + /ws/chat).
+# ws_url: ws://localhost:8200/ws/chat
+
+# Set only if agent-forge has auth enabled.
+# api_key: agent-forge-api-key-here
+
+# Server-side custom agent Felix targets (see agent-forge custom_agents.yaml).
+default_agent: "@felix"
+probe_agent: "@felix"
+
+# Keeps Felix sessions out of the human chat sidebar.
+source: felix
+
+# Backend provider for Felix runs. AgentForge remaps every capability tier
+# (general/heavy/light/...) to this provider's specific models via
+# profiles/providers/<provider>.yaml. Leave unset to use AgentForge defaults.
+# One of: ollama | bedrock | deepinfra | openrouter
+# provider: ollama
+
+# Skill fleet. The indexer/search service (Qdrant-backed).
+search_base: http://localhost:8200
+skills_source_name: felix-skills
+skills_top_k: 5
+skills_score_threshold: 0.5
+# Where chunk JSON is written for the indexer. Must be (or be synced to) the
+# indexer host's chunks_dir. Empty > ~/.felix/chunks.
+# skills_chunks_dir: /app/data/chunks
+
+# Skill firewall. Vet acquired skills before they reach the catalog. A skill
+# body is instructions to the agent, so an acquired skill is untrusted input.
+#   quarantine = hold failing skills for review (default; felix skills quarantine)
+#   warn       = log the verdict but still catalog the skill
+#   off        = no vetting
+skills_vetting: quarantine
+# The LLM judge runs only if vetting_provider is set — otherwise vetting
+# is static-scan-only (still the deterministic floor). Felix calls the provider
+# directly, independent of agent-forge. Key via env FELIX_VETTING_API_KEY.
+# vetting_provider: openrouter        # openrouter | deepinfra | ollama
+# vetting_model: anthropic/claude-3.5-haiku
+# vetting_base_url: https://openrouter.ai/api/v1
+# vetting_allow_hosts: []             # outbound hosts that don't trip the exfil rule
+
+# Hosts the outbound diagnostic tools (http_check / dns_lookup / net_probe) may
+# reach without a confirmation prompt. Local/private/internal targets (localhost,
+# 10.x, container names, *.internal) are always allowed; arbitrary external hosts
+# are gated to block exfiltration via a probe. Add the public targets you diagnose.
+# egress_allow_hosts: []              # e.g., ["status.mysite.com", "api.mycorp.com"]
