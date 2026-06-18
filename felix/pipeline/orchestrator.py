@@ -396,11 +396,7 @@ class Orchestrator:
                     # Raw type trace so we can see exactly what the server emits.
                     self.store.append_event({"phase": phase, "type": event.type})
 
-                    if (
-                        self._pending_file_changes
-                        and not event.is_file_diff
-                        and not event.is_confirm_request
-                    ):
+                    if self._pending_file_changes and not event.is_file_diff and not event.is_confirm_request:
                         self._flush_pending_files(result)
 
                     if event.type == "session.init":
@@ -487,13 +483,23 @@ class Orchestrator:
         return record
 
     def _record_file_diff(self, event: Event, result: DriveResult) -> None:
+        path = event.get("path")
+        pre_hash = event.get("snapshot_id") or event.get("pre_hash")
+        # The server emits file.diff twice per code_edit: once for the preview
+        # (propose phase) and once from the verified-write result parsing.
+        # Skip the duplicate so it doesn't create a spurious pending entry.
+        if pre_hash and any(
+            c.get("file_path") == path and c.get("snapshot_id") == pre_hash
+            for c in result.file_changes
+        ):
+            return
         change = {
-            "file_path": event.get("path"),
+            "file_path": path,
             "additions": event.get("additions", 0),
             "deletions": event.get("deletions", 0),
             "action": event.get("action", "edited"),
             "pre_hash": event.get("pre_hash"),
-            "snapshot_id": event.get("snapshot_id") or event.get("pre_hash"),
+            "snapshot_id": pre_hash,
         }
         result.file_changes.append(change)
         self._pending_file_changes.append(change)
