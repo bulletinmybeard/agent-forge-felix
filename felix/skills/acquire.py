@@ -25,6 +25,13 @@ from felix.skills.vet import VetResult, vet_skill
 
 _FRONTMATTER = re.compile(r"^\s*---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
+SKILLS_SH_BASE = "https://www.skills.sh"
+
+
+def skills_sh_url(source: str, skill_id: str) -> str:
+    return f"{SKILLS_SH_BASE}/{source}/{skill_id}"
+
+
 # Bundled system-ops baseline skills, always added to the catalog so Felix has
 # core diagnostic know-how regardless of what external sources provide.
 ANCHORS_DIR = Path(__file__).resolve().parent / "anchors"
@@ -260,6 +267,7 @@ def acquire_skill(
     client: httpx.Client | None = None,
     config=None,
     vet_client=None,
+    skills_sh_url: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Pull a single `source` (owner/repo) + `skill_id` into the catalog.
 
@@ -279,6 +287,8 @@ def acquire_skill(
         return None, f"skill '{skill_id}' not found in {source} ({len(files)} skills present)"
 
     out_name, prov = _write_skill(target, root, repo=source, ref=ref, slug_prefix=source.replace("/", "__"))
+    if skills_sh_url:
+        prov["skills_sh_url"] = skills_sh_url
     catalog_dir.mkdir(parents=True, exist_ok=True)
     status = route_skill(
         out_name, prov.pop("markdown"), prov, catalog_dir=catalog_dir, config=config, client=vet_client
@@ -362,6 +372,8 @@ def acquire(
                 out_name, prov = _write_skill(
                     skill_file, root, repo=source.repo, ref=source.ref, slug_prefix=source.slug
                 )
+                skill_id = skill_file.parent.name if skill_file.name == "SKILL.md" else skill_file.stem
+                prov["skills_sh_url"] = skills_sh_url(source.repo, skill_id)
                 status = route_skill(
                     out_name, prov.pop("markdown"), prov, catalog_dir=catalog_dir, config=config, client=vet_client
                 )
