@@ -16,6 +16,7 @@ from pathlib import Path
 
 import click
 import httpx
+from chalkbox import Table as CTable
 
 from felix.api.rest import RestClient
 from felix.config import Config, load_config
@@ -26,7 +27,7 @@ from felix.runstore.reader import load_run
 from felix.runstore.store import RunStore
 from felix.runstore.undo import plan_undo, undo_run
 from felix.safety.gate import ModeFlags
-from felix.skills.acquire import acquire, acquire_skill, approve_quarantined
+from felix.skills.acquire import acquire, acquire_skill, approve_quarantined, skills_sh_url
 from felix.skills.discover import discover_and_index, search_skills
 from felix.skills.index import build_and_index
 from felix.skills.judge_client import build_judge_client
@@ -265,8 +266,25 @@ def skills_find(query: tuple[str, ...], limit: int) -> None:
     if not results:
         ui.info("no skills found")
         return
+
+    manifest_file = config.catalog_dir / "_manifest.json"
+    acquired: set[tuple[str, str]] = set()
+    if manifest_file.is_file():
+        for prov in json.loads(manifest_file.read_text()).get("skills", {}).values():
+            acquired.add((prov.get("repo", ""), prov.get("name", "")))
+
+    table = CTable(headers=["Installs", "Skill", "Added", "Source"], row_styles="severity")
     for r in results:
-        ui.console.print(f"[green]{r.installs:>7}[/green]  [bold]{r.ref}[/bold]  [dim]{r.name}[/dim]")
+        url = skills_sh_url(r.source, r.skill_id)
+        have = (r.source, r.skill_id) in acquired
+        table.add_row(
+            str(r.installs),
+            r.ref,
+            "[green]y[/green]" if have else "[dim]n[/dim]",
+            f"[dim][link={url}]skills.sh[/link][/dim]",
+            severity="success" if have else "muted",
+        )
+    ui.console.print(table)
     ui.info("add one with: felix skills add <owner/repo@skill>")
 
 
@@ -280,26 +298,42 @@ def skills_add(refs: tuple[str, ...], do_index: bool) -> None:
     vet_client = build_judge_client(config)
     if config.skills_vetting != "off" and vet_client is None:
         ui.info("vetting: static scan only (no vetting_provider configured)")
+
     added = 0
+    rows: list[tuple[str, str, str, str]] = []
     try:
         with tempfile.TemporaryDirectory(prefix="felix-skill-") as tmp:
             for ref in refs:
                 source, _, skill_id = ref.partition("@")
                 if not skill_id:
-                    ui.error(f"expected owner/repo@skill, got: {ref}")
+                    rows.append((ref, "", "invalid format", "expected owner/repo@skill"))
                     continue
                 with ui.spinner(f"fetching + vetting {ref}"):
                     out_name, err = acquire_skill(
-                        source, skill_id, config.catalog_dir, Path(tmp), config=config, vet_client=vet_client
+                        source,
+                        skill_id,
+                        config.catalog_dir,
+                        Path(tmp),
+                        config=config,
+                        vet_client=vet_client,
+                        skills_sh_url=skills_sh_url(source, skill_id),
                     )
                 if err:
-                    ui.error(f"{ref}: {err}")
+                    rows.append((ref, "", "failed", err))
                 else:
-                    ui.success(f"added {ref} -> {out_name}")
+                    url = skills_sh_url(source, skill_id)
+                    rows.append((ref, out_name or "", "added", f"[link={url}]skills.sh[/link]"))
                     added += 1
     finally:
         if vet_client is not None:
             vet_client.close()
+
+    table = CTable(headers=["Skill", "Catalog Entry", "Status", "Details"], row_styles="severity")
+    for ref, entry, status, details in rows:
+        severity = "success" if status == "added" else "error"
+        table.add_row(ref, entry, status, details, severity=severity)
+    ui.console.print(table)
+
     if added and do_index:
         with ui.spinner("uploading + embedding chunks (server-side, can take minutes)"):
             result = build_and_index(config)
@@ -350,8 +384,14 @@ def skills_list() -> None:
         return
     data = json.loads(manifest.read_text())
     ui.info(f"{data.get('count', 0)} skill(s) in {config.catalog_dir}")
+
+    table = CTable(headers=["Skill", "Repo", "Source"])
     for name, prov in data.get("skills", {}).items():
-        ui.console.print(f"- {prov.get('name', name)}  [dim]{prov.get('repo', '')}[/dim]")
+        repo = prov.get("repo", "")
+        sh_url = prov.get("skills_sh_url", "")
+        source = f"[link={sh_url}]skills.sh[/link]" if sh_url else ""
+        table.add_row(prov.get("name", name), repo, source)
+    ui.console.print(table)
 
 
 @skills.command("quarantine")

@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 
 from felix.config import Config
-from felix.skills.acquire import acquire_skill
+from felix.skills.acquire import acquire_skill, skills_sh_url
 from felix.skills.index import build_and_index
 from felix.skills.judge_client import build_judge_client
 
@@ -75,7 +75,13 @@ def discover_and_index(config: Config, query: str, *, log: Any = print) -> dict[
         with tempfile.TemporaryDirectory(prefix="felix-discover-") as tmp:
             for f in found:
                 out_name, err = acquire_skill(
-                    f.source, f.skill_id, config.catalog_dir, Path(tmp), config=config, vet_client=vet_client
+                    f.source,
+                    f.skill_id,
+                    config.catalog_dir,
+                    Path(tmp),
+                    config=config,
+                    vet_client=vet_client,
+                    skills_sh_url=skills_sh_url(f.source, f.skill_id),
                 )
                 if err:
                     log(f"skip {f.ref}: {err}")

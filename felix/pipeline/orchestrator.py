@@ -25,13 +25,13 @@ from felix.runstore.store import RunStore
 from felix.safety.gate import Decision, ModeFlags, evaluate
 from felix.safety.tiers import RiskTier, classify
 from felix.skills.retrieve import SkillRetriever
-from felix.ui.secret import ask_secret
 from felix.ui.confirm import ask_confirm
 from felix.ui.console import ConsoleUI
+from felix.ui.secret import ask_secret
 from felix.verify.verifier import (
     Signals,
-    VerificationResult,
     Verdict,
+    VerificationResult,
     contradicts_fixed,
     decide,
     extract_signals,

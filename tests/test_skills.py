@@ -2,13 +2,13 @@ from pathlib import Path
 
 from felix.config import Config
 from felix.skills.acquire import (
+    _match_skill_file,
     approve_quarantined,
     discover_skill_files,
     normalize_skill,
     parse_skill_md,
     slugify,
 )
-from felix.skills.acquire import _match_skill_file
 from felix.skills.discover import parse_results
 from felix.skills.retrieve import RetrievedSkill, SkillRetriever, map_hit
 from felix.skills.sources import Source, load_sources
@@ -190,6 +190,7 @@ def test_retriever_maps_search_results(monkeypatch):
 
 # -- skill firewall integration: route_skill -----------------------------
 import json as _json  # noqa: E402
+
 from felix.skills.acquire import route_skill  # noqa: E402
 
 
