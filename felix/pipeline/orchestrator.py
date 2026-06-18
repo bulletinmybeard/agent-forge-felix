@@ -408,8 +408,10 @@ class Orchestrator:
                     elif event.type == "agent.tool_exec":
                         self._record_tool_exec(event, result)
                     elif event.is_confirm_request:
-                        await self._handle_confirm(ws, event, pending_tool, flags, result)
+                        abort = await self._handle_confirm(ws, event, pending_tool, flags, result)
                         pending_tool = None
+                        if abort:
+                            break
                     elif event.is_secret_request:
                         prompt = event.get("prompt", "")
                         request_id = event.get("request_id", "")
@@ -489,8 +491,7 @@ class Orchestrator:
         # (propose phase) and once from the verified-write result parsing.
         # Skip the duplicate so it doesn't create a spurious pending entry.
         if pre_hash and any(
-            c.get("file_path") == path and c.get("snapshot_id") == pre_hash
-            for c in result.file_changes
+            c.get("file_path") == path and c.get("snapshot_id") == pre_hash for c in result.file_changes
         ):
             return
         change = {
@@ -561,10 +562,10 @@ class Orchestrator:
         pending_tool: dict[str, Any] | None,
         flags: ModeFlags,
         result: DriveResult,
-    ) -> None:
+    ) -> bool:
         if event.get("auto_accepted"):
             self._flush_pending_files(result)
-            return
+            return False
 
         prompt = event.get("prompt", "")
         request_id = event.get("request_id", "")
@@ -590,7 +591,7 @@ class Orchestrator:
                 pending_tool["applied"] = True
             self._flush_pending_files(result)
             result.applied_any = True
-            return
+            return False
 
         gate = evaluate(tier, flags)
 
@@ -611,9 +612,14 @@ class Orchestrator:
         if confirmed:
             self._flush_pending_files(result)
             result.applied_any = True
-        else:
-            await self._revert_pending_files(result)
-            result.rollback_hints.append(f"not applied (denied): {command or name}")
+            return False
+
+        await self._revert_pending_files(result)
+        # User denied changes.
+        # Cancel the run so the agent can't retry via a different tool
+        # (sed, write_file, etc.) and bypass the gate.
+        await ws.send(cancel_message())
+        return True
 
     # -- prompt + flag helpers -------------------------------------------
     def _main_text(self, prompt: str) -> str:
