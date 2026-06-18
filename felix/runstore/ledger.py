@@ -72,6 +72,13 @@ class Ledger:
                 out.append(json.loads(line))
         return out
 
+    def remove_by_paths(self, paths: set[str]) -> None:
+        """Rewrite the ledger excluding file entries whose path is in ``paths``."""
+        records = [r for r in self.read() if not (r.get("kind") == "file" and r.get("file_path") in paths)]
+        with self.path.open("w") as fh:
+            for rec in records:
+                fh.write(json.dumps(rec, default=str) + "\n")
+
     def file_changes(self) -> list[dict[str, Any]]:
         """File records that carry a revertible pre_hash, newest first."""
         records = [r for r in self.read() if r.get("kind") == "file" and r.get("pre_hash")]

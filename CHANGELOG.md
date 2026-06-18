@@ -6,6 +6,20 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-18
+
+### Fixed
+
+- Confirmation gate: denied file edits are now reverted on disk via `revert_file` instead of staying applied
+- Confirmation gate: denying a prompt now cancels the entire run immediately so the agent cannot retry the same change via a different tool (e.g., `sed -i`, `write_file`)
+- Duplicate `file.diff` events from the server's two-phase code_edit flow no longer create weird pending entries
+- `applied_any` is no longer set prematurely on `file.diff` receipt. Deferred to the confirm gate or auto-flush so a denied edit produces a `Proposed` verdict instead of `Fixed`
+
+### Added
+
+- `_flush_pending_files()` / `_revert_pending_files()` helpers for the buffered confirmation flow
+- `Ledger.remove_by_paths()` to clean up ledger entries for denied file changes
+
 ## [0.2.0] - 2026-06-18
 
 First tagged release.
