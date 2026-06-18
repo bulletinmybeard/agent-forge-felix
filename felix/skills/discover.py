@@ -55,7 +55,11 @@ def search_skills(
     finally:
         if owns:
             client.close()
-    return parse_results(data, limit=limit or config.skills_discover_limit)
+    return parse_results(
+        data,
+        limit=limit or config.skills_discover_limit,
+        blocked_repos=config.skills_blocked_repos,
+    )
 
 
 def discover_and_index(config: Config, query: str, *, log: Any = print) -> dict[str, Any]:
@@ -100,7 +104,13 @@ def discover_and_index(config: Config, query: str, *, log: Any = print) -> dict[
     return result
 
 
-def parse_results(data: Any, *, limit: int) -> list[FoundSkill]:
+def parse_results(
+    data: Any,
+    *,
+    limit: int,
+    blocked_repos: list[str] | None = None,
+) -> list[FoundSkill]:
+    _blocked = set(blocked_repos or [])
     skills = data.get("skills", []) if isinstance(data, dict) else []
     out: list[FoundSkill] = []
     for s in skills:
@@ -111,6 +121,8 @@ def parse_results(data: Any, *, limit: int) -> list[FoundSkill]:
         if not source or not skill_id:
             continue
         if not _REPO_RE.match(source):  # drop malformed/injected owner/repo
+            continue
+        if source in _blocked:
             continue
         out.append(
             FoundSkill(

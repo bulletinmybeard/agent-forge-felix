@@ -63,6 +63,12 @@ class Config:
     # Dynamic discovery against the skills.sh registry (same data as `npx skills`).
     skills_search_api: str = "https://skills.sh/api/search"
     skills_discover_limit: int = 3
+    # Repos whose downloaded content triggers antivirus heuristics
+    # (e.g., pentesting command examples flagged as TurtlePerlsh.A!dha).
+    # Matched against the "owner/repo" source field before any download happens.
+    skills_blocked_repos: list[str] = field(default_factory=lambda: [
+        "aradotso/security-skills",
+    ])
     # Auto-fetch+index skills from skills.sh when local retrieval finds none.
     skills_auto_discover: bool = True
     # Where chunk JSON is written for the indexer to read. Must be (or be synced
