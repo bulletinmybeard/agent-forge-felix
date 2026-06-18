@@ -22,6 +22,7 @@ from felix.pipeline.planpreview import trace_to_markdown
 from felix.report import ReportInput, build_report
 from felix.runstore.ledger import ChangeRecord, Ledger
 from felix.runstore.store import RunStore
+from felix.runstore.undo import _revert_one
 from felix.safety.gate import Decision, ModeFlags, evaluate
 from felix.safety.tiers import RiskTier, classify
 from felix.skills.retrieve import SkillRetriever
@@ -147,6 +148,7 @@ class Orchestrator:
         # so parallel confirm prompts (e.g., a model proposing several edits at
         # once) don't re-prompt before the server's auto-accept propagates.
         self._auto_accept_all = False
+        self._pending_file_changes: list[dict[str, Any]] = []
 
     async def run(self, prompt: str) -> Verdict:
         self.store.write_prompt(prompt)
@@ -394,6 +396,13 @@ class Orchestrator:
                     # Raw type trace so we can see exactly what the server emits.
                     self.store.append_event({"phase": phase, "type": event.type})
 
+                    if (
+                        self._pending_file_changes
+                        and not event.is_file_diff
+                        and not event.is_confirm_request
+                    ):
+                        self._flush_pending_files(result)
+
                     if event.type == "session.init":
                         result.session_id = event.get("session_id", "")
                     elif event.is_tool_call:
@@ -465,11 +474,11 @@ class Orchestrator:
         }
         result.commands.append(record)
         self.store.append_command(record)
-        # A mutating command on a writable run counts as an applied change even
-        # when it runs via ssh/shell with no file.diff and no confirm gate — e.g.
-        # a fix done entirely through scp + rebuild + recreate. Without this,
-        # applied_any stays False and _verify mislabels a real fix as PROPOSED.
-        if not flags.read_only and (tier > RiskTier.READ_ONLY or (command and _is_activation_command(command))):
+        # Activation commands (deploy, restart, rebuild, scp, ...) count as
+        # applied even when they run via ssh/shell with no file.diff and no
+        # confirm gate. File-editing tools defer applied_any to the confirm
+        # gate or the pending-file auto-flush so a denied edit doesn't stick.
+        if not flags.read_only and command and _is_activation_command(command):
             result.applied_any = True
         if command and _is_activation_command(command):
             result.edited_since_activation = False  # the edit was followed by an activation
@@ -487,8 +496,7 @@ class Orchestrator:
             "snapshot_id": event.get("snapshot_id") or event.get("pre_hash"),
         }
         result.file_changes.append(change)
-        result.applied_any = True
-        result.edited_since_activation = True  # cleared when an activation command runs
+        self._pending_file_changes.append(change)
         self.store.write_diff_snapshot(event.get("path", "unknown"), event.get("diff_text", ""))
         self.ledger.append(
             ChangeRecord(
@@ -505,6 +513,27 @@ class Orchestrator:
             result.rollback_hints.append(
                 f"revert {change['file_path']} via revert_file(pre_hash={change['snapshot_id']})"
             )
+
+    def _flush_pending_files(self, result: DriveResult) -> None:
+        """Mark buffered file changes as applied (server auto-approved them)."""
+        if self._pending_file_changes:
+            result.applied_any = True
+            result.edited_since_activation = True
+            self._pending_file_changes.clear()
+
+    async def _revert_pending_files(self, result: DriveResult) -> None:
+        """Revert all pending file changes and clean up state."""
+        denied_paths: set[str] = set()
+        for change in self._pending_file_changes:
+            path = change.get("file_path", "")
+            pre_hash = change.get("snapshot_id") or change.get("pre_hash", "")
+            if path and pre_hash:
+                await _revert_one(self.config, self.config.source, path, pre_hash)
+            denied_paths.add(path)
+        result.file_changes = [c for c in result.file_changes if c.get("file_path") not in denied_paths]
+        if denied_paths:
+            self.ledger.remove_by_paths(denied_paths)
+        self._pending_file_changes.clear()
 
     def _record_tool_exec(self, event: Event, result: DriveResult) -> None:
         if event.get("status") != "done":
@@ -528,7 +557,8 @@ class Orchestrator:
         result: DriveResult,
     ) -> None:
         if event.get("auto_accepted"):
-            return  # server already auto-accepted (earlier "yes to all")
+            self._flush_pending_files(result)
+            return
 
         prompt = event.get("prompt", "")
         request_id = event.get("request_id", "")
@@ -552,6 +582,7 @@ class Orchestrator:
             await ws.send(confirm_response_message(request_id, True, auto_accept=True))
             if pending_tool is not None:
                 pending_tool["applied"] = True
+            self._flush_pending_files(result)
             result.applied_any = True
             return
 
@@ -572,8 +603,10 @@ class Orchestrator:
         if pending_tool is not None:
             pending_tool["applied"] = confirmed
         if confirmed:
+            self._flush_pending_files(result)
             result.applied_any = True
         else:
+            await self._revert_pending_files(result)
             result.rollback_hints.append(f"not applied (denied): {command or name}")
 
     # -- prompt + flag helpers -------------------------------------------
