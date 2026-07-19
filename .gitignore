@@ -13,3 +13,11 @@ build/
 .idea/
 .vscode/
 
+*.local.sh
+zsh_function.local.sh
+config.local.yaml
+deploy*.local.env
+.env
+.env.*
+!.env.example
+

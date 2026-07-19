@@ -30,6 +30,24 @@ def test_unknown_mutating_tool_defaults_medium():
     assert classify(tool_name="write_file") == RiskTier.MEDIUM
 
 
+def test_shell_diagnostic_chain_is_read_only():
+    cmd = "docker ps -a && df -h && npm --version"
+    assert classify(tool_name="shell", command=cmd) == RiskTier.READ_ONLY
+    assert classify(tool_name="shell", command="npm --version") == RiskTier.READ_ONLY
+    assert classify(tool_name="shell", command="docker ps -a") == RiskTier.READ_ONLY
+    assert classify(tool_name="shell", command="df -h") == RiskTier.READ_ONLY
+
+
+def test_shell_mutation_stays_medium_or_high():
+    assert classify(tool_name="shell", command="npm install express") == RiskTier.MEDIUM
+    assert classify(tool_name="shell", command="docker restart web") == RiskTier.LOW
+
+
+def test_read_only_flag_approves_diagnostic_shell():
+    tier = classify(tool_name="shell", command="docker ps -a && df -h && npm --version")
+    assert evaluate(tier, ModeFlags(read_only=True)).decision == Decision.APPROVE
+
+
 # -- gate decisions ------------------------------------------------------
 
 

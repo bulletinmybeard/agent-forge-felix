@@ -63,20 +63,32 @@ class DriveResult:
 
 
 # Commands that make a changed input take effect in the running target.
-# Broad on purpose: a missed match only costs one harmless re-prompt, while a false match
-# just skips the backstop (same as before this existed). Generic across stacks
-# and not Docker-specific.
+# Match shell *verbs*, not substrings in paths (e.g. "Service Worker" must not
+# look like `service … restart` or a bare `service` token).
 _ACTIVATION_RE = re.compile(
-    r"\b("
-    r"deploy|redeploy|rollout|"
-    r"docker\s+build|buildx|--build|compose\s+(?:up|build)|\bup\s+-d\b|force-recreate|recreate|"
-    r"restart|reload|"
-    r"systemctl|service\b|launchctl|"
-    r"kubectl\s+apply|helm\s+(?:up|install)|terraform\s+apply|nixos-rebuild|ansible|"
-    r"make\s+\w*(?:deploy|build|install|up)|"
-    r"scp|rsync|"
-    r"migrate"
-    r")\b",
+    r"(?:"
+    r"(?:^|&&|\|\||;|\|)\s*(?:sudo\s+)?(?:"
+    r"docker\s+(?:build|buildx|restart|stop|rm|rmi|system\s+prune)\b"
+    r"|docker\s+compose\b[\w.\s/=\-\"']*?\b(?:up|build|restart|down)\b"
+    r"|compose\s+(?:up|build|restart|down)\b"
+    r"|(?:systemctl|launchctl)\s+\S+"
+    r"|service\s+\S+\s+(?:start|stop|restart|reload|enable|disable)"
+    r"|kubectl\s+(?:apply|rollout|delete|scale)"
+    r"|helm\s+(?:up(?:grade)?|install|rollback)"
+    r"|terraform\s+apply"
+    r"|nixos-rebuild"
+    r"|ansible(?:-playbook)?"
+    r"|make\s+\S*(?:deploy|build|install|up)\S*"
+    r"|(?:scp|rsync)\b"
+    r"|(?:alembic|django-admin|manage\.py)\s+migrate"
+    r"|npm\s+(?:run\s+)?(?:build|deploy)"
+    r"|pnpm\s+(?:run\s+)?(?:build|deploy)"
+    r"|yarn\s+(?:run\s+)?(?:build|deploy)"
+    r")"
+    r"|(?:^|&&|\|\||;)\s*(?:sudo\s+)?(?:deploy|redeploy)\b"
+    r"|bash\s+\S*deploy\S*|/\S*deploy[\w.-]*\.(?:sh|bash|py)"
+    r"|\bforce-recreate\b|\b--build\b|\bup\s+-d\b"
+    r")",
     re.IGNORECASE,
 )
 
@@ -209,6 +221,10 @@ class Orchestrator:
             md = trace_to_markdown(trace)
             self.store.write_plan(md)
             self.ui.info(f"plan: mode={trace.get('final_mode', '?')}")
+            if getattr(self.ui, "at_least", lambda _n: False)(2):
+                # Short plan dump at -vv (full plan.md is always on disk).
+                preview = md if len(md) <= 1200 else md[:1199] + "…"
+                self.ui.debug("plan preview:\n" + preview)
         except Exception as exc:  # noqa: BLE001 — preview is best-effort
             self.ui.warn(f"plan preview unavailable: {exc}")
 
@@ -347,6 +363,8 @@ class Orchestrator:
         self.ui.stage(f"injecting {len(skills)} skill(s)")
         for s in skills:
             self.ui.info(f"  {s.title} ({s.score:.2f})")
+            if getattr(self.ui, "at_least", lambda _n: False)(1):
+                self.ui.verbose(1, f"    id={s.id}")
             self.store.append_skill({"id": s.id, "title": s.title, "score": s.score})
         return {"_skills": [s.to_override() for s in skills]}
 
@@ -391,7 +409,11 @@ class Orchestrator:
 
                 async for event in ws.events():
                     work.set(_spinner_label(event, label))
-                    if phase == "run":
+                    # Always feed the UI during the main run; at -vv also render
+                    # before/after probes so tool outputs are visible there too.
+                    if phase == "run" or (
+                        phase in ("before", "after") and getattr(self.ui, "at_least", lambda _n: False)(2)
+                    ):
                         self.ui.render(event)
                     # Raw type trace so we can see exactly what the server emits.
                     self.store.append_event({"phase": phase, "type": event.type})
@@ -462,6 +484,8 @@ class Orchestrator:
             args=args if isinstance(args, dict) else None,
             egress_allow_hosts=self.config.egress_allow_hosts,
         )
+        # `ran_ok` = tool was allowed to execute (read-only auto-run, or will
+        # flip to True on confirm). Not the same as a state-changing *apply*.
         record = {
             "name": event.get("name"),
             "command": command,
@@ -476,9 +500,10 @@ class Orchestrator:
         # applied even when they run via ssh/shell with no file.diff and no
         # confirm gate. File-editing tools defer applied_any to the confirm
         # gate or the pending-file auto-flush so a denied edit doesn't stick.
-        if not flags.read_only and command and _is_activation_command(command):
+        # Never treat pure diagnostics as applied (false Fixed).
+        if not flags.read_only and command and tier > RiskTier.READ_ONLY and _is_activation_command(command):
             result.applied_any = True
-        if command and _is_activation_command(command):
+        if command and _is_activation_command(command) and tier > RiskTier.READ_ONLY:
             result.edited_since_activation = False  # the edit was followed by an activation
         if tier >= RiskTier.MEDIUM:
             result.risk_notes.append(f"{tier.name.lower()}-risk: {command or event.get('name')}")
@@ -590,17 +615,23 @@ class Orchestrator:
             if pending_tool is not None:
                 pending_tool["applied"] = True
             self._flush_pending_files(result)
-            result.applied_any = True
+            # Read-only auto-confirms must not count as a state-changing apply.
+            if tier > RiskTier.READ_ONLY:
+                result.applied_any = True
             return False
 
         gate = evaluate(tier, flags)
 
         if gate.decision == Decision.APPROVE:
             confirmed, auto_accept = True, gate.auto_accept
+            if getattr(self.ui, "at_least", lambda _n: False)(1):
+                self.ui.verbose(1, f"confirm auto-approve tier={tier.name} ({gate.reason})")
         elif gate.decision == Decision.DENY:
             confirmed, auto_accept = False, False
             self.ui.warn(f"denied ({gate.reason}): {prompt}")
         else:  # PROMPT
+            if getattr(self.ui, "at_least", lambda _n: False)(1):
+                self.ui.verbose(1, f"confirm prompt tier={tier.name} ({gate.reason})")
             with self.ui.suspend():  # stop the spinner so we can read the answer
                 confirmed, auto_accept = ask_confirm(prompt, tier, console=self.ui.console)
             if auto_accept:  # user chose "all" — make it sticky for the rest of the run
@@ -611,7 +642,10 @@ class Orchestrator:
             pending_tool["applied"] = confirmed
         if confirmed:
             self._flush_pending_files(result)
-            result.applied_any = True
+            # Only LOW+ mutations / confirmed writes flip applied_any. Auto-approve
+            # of a read-only probe (or a no-op confirm) must stay Proposed.
+            if tier > RiskTier.READ_ONLY:
+                result.applied_any = True
             return False
 
         await self._revert_pending_files(result)

@@ -4,6 +4,7 @@ felix "why is container xyz-1 unhealthy?"        # diagnose + fix + verify
 felix "..." --dry-run | --apply | --yes | --read-only | --deep
 felix doctor                                          # self-check
 felix last | explain | undo | replay [RUN_ID]         # work with prior runs
+felix permissions show | set-mode | allow | …         # shell/SSH policy overrides
 """
 
 from __future__ import annotations
@@ -21,6 +22,15 @@ from chalkbox import Table as CTable
 from felix.api.rest import RestClient
 from felix.config import Config, load_config
 from felix.doctor import run_doctor
+from felix.permissions import (
+    empty_policy,
+    format_policy_block,
+    merge_list_edit,
+    mode_warning,
+    normalize_policy,
+    overrides_put_body,
+    set_mode,
+)
 from felix.pipeline.orchestrator import Orchestrator
 from felix.pipeline.preflight import check as preflight_check
 from felix.runstore.reader import load_run
@@ -49,9 +59,18 @@ class DefaultGroup(click.Group):
 
 
 @click.group(cls=DefaultGroup, invoke_without_command=False)
+@click.option(
+    "-v",
+    "--verbose",
+    count=True,
+    help="Increase output verbosity (-v, -vv). Also accepted on `run`.",
+)
 @click.version_option(package_name="felix")
-def main() -> None:
+@click.pass_context
+def main(ctx: click.Context, verbose: int) -> None:
     """Felix — diagnose. fix. verify."""
+    ctx.ensure_object(dict)
+    ctx.obj["verbose"] = verbose
 
 
 @main.command()
@@ -62,7 +81,15 @@ def main() -> None:
 @click.option("--read-only", is_flag=True, help="Diagnose and propose only; block all changes.")
 @click.option("--deep", is_flag=True, help="Deeper investigation (more areas/rounds).")
 @click.option("--discover", is_flag=True, help="Search skills.sh for task-relevant skills, pull + index them first.")
+@click.option(
+    "-v",
+    "--verbose",
+    count=True,
+    help="Increase output verbosity: -v more detail, -vv tool outputs/iterations.",
+)
+@click.pass_context
 def run(
+    ctx: click.Context,
     prompt: tuple[str, ...],
     dry_run: bool,
     apply_: bool,
@@ -70,11 +97,15 @@ def run(
     read_only: bool,
     deep: bool,
     discover: bool,
+    verbose: int,
 ) -> None:
     """Diagnose, fix, and verify the described problem."""
     text = " ".join(prompt).strip()
     config = load_config()
-    ui = ConsoleUI()
+    # Group-level -v plus run-level -v stack (max of both).
+    group_v = int((ctx.obj or {}).get("verbose") or 0)
+    verbosity = max(verbose, group_v)
+    ui = ConsoleUI(verbosity=verbosity)
 
     pf = preflight_check(text)
     if not pf.ok:
@@ -114,6 +145,381 @@ def doctor() -> None:
             ui.error(f"{chk.name}: {chk.detail}")
             failed += 1
     sys.exit(1 if failed else 0)
+
+
+# ── Command permissions (AgentForge ≥ 0.12) ─────────────────────────────
+
+
+def _perm_tool_option(default: str = "shell"):
+    return click.option(
+        "--tool",
+        type=click.Choice(["shell", "ssh"], case_sensitive=False),
+        default=default,
+        show_default=True,
+        help="Which tool policy to edit.",
+    )
+
+
+def _fetch_tool_bundle(rest: RestClient, tool: str) -> dict:
+    data = rest.command_permissions()
+    if not isinstance(data, dict) or tool not in data:
+        raise click.ClickException(
+            f"permissions API missing tool={tool!r} — need AgentForge ≥ 0.12 (/api/permissions/commands)"
+        )
+    return data[tool] if isinstance(data[tool], dict) else {}
+
+
+def _current_override(rest: RestClient, tool: str) -> dict:
+    """Override document for *tool*, or empty policy when unset."""
+    try:
+        ov = rest.get_command_overrides()
+    except httpx.HTTPStatusError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            raise click.ClickException("permissions overrides API missing — need AgentForge ≥ 0.12") from exc
+        raise click.ClickException(f"permissions API error: {exc}") from exc
+    if not isinstance(ov, dict):
+        return empty_policy()
+    raw = ov.get(tool)
+    return normalize_policy(raw if isinstance(raw, dict) else None)
+
+
+def _put_override(rest: RestClient, tool: str, policy: dict, ui: ConsoleUI, *, dry_run: bool) -> None:
+    body = overrides_put_body(tool, policy)  # type: ignore[arg-type]
+    if dry_run:
+        ui.info(f"dry-run PUT body:\n{json.dumps(body, indent=2)}")
+        return
+    try:
+        rest.put_command_overrides(body)
+    except httpx.HTTPStatusError as exc:
+        raise click.ClickException(f"PUT overrides failed: {exc}") from exc
+    ui.success(f"saved {tool} runtime override")
+    warn = mode_warning(str(policy.get("mode", "confirm")))
+    if warn:
+        ui.warn(warn)
+    # Re-fetch effective for display
+    try:
+        bundle = _fetch_tool_bundle(rest, tool)
+        ui.console.print(format_policy_block("effective:", bundle.get("effective")))
+    except Exception:  # noqa: BLE001
+        ui.console.print(format_policy_block("override:", policy))
+
+
+@main.group("permissions")
+def permissions_group() -> None:
+    """Manage AgentForge shell/SSH command permission overrides (runtime)."""
+
+
+@permissions_group.command("show")
+@click.option(
+    "--tool",
+    type=click.Choice(["shell", "ssh", "all"], case_sensitive=False),
+    default="all",
+    show_default=True,
+)
+@click.option("--json", "as_json", is_flag=True, help="Print raw API JSON.")
+def permissions_show(tool: str, as_json: bool) -> None:
+    """Show YAML baseline, runtime override, and effective policy."""
+    config = load_config()
+    ui = ConsoleUI()
+    with RestClient(config) as rest:
+        try:
+            data = rest.command_permissions()
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                ui.error("permissions API missing — need AgentForge ≥ 0.12")
+                sys.exit(1)
+            ui.error(f"permissions API error: {exc}")
+            sys.exit(1)
+    if as_json:
+        if tool != "all" and isinstance(data, dict):
+            ui.console.print_json(data=data.get(tool))
+        else:
+            ui.console.print_json(data=data)
+        return
+    tools = ["shell", "ssh"] if tool == "all" else [tool]
+    for t in tools:
+        bundle = data.get(t, {}) if isinstance(data, dict) else {}
+        if not isinstance(bundle, dict):
+            continue
+        ui.info(f"── {t} ──")
+        ui.console.print(format_policy_block("yaml (baseline):", bundle.get("yaml")))
+        ov = bundle.get("override")
+        ui.console.print(format_policy_block("override:", ov if ov else None))
+        if not ov:
+            ui.console.print("  [dim](no runtime override — YAML only)[/dim]")
+        ui.console.print(format_policy_block("effective:", bundle.get("effective")))
+        warn = mode_warning(str((bundle.get("effective") or {}).get("mode", "confirm")))
+        if warn:
+            ui.warn(warn)
+
+
+@permissions_group.command("set-mode")
+@click.argument("mode", type=click.Choice(["confirm", "allowlist", "denylist"], case_sensitive=False))
+@_perm_tool_option()
+@click.option("--dry-run", is_flag=True, help="Print PUT body only.")
+def permissions_set_mode(mode: str, tool: str, dry_run: bool) -> None:
+    """Set the runtime override mode (confirm | allowlist | denylist)."""
+    config = load_config()
+    ui = ConsoleUI()
+    with RestClient(config) as rest:
+        policy = set_mode(_current_override(rest, tool), mode)  # type: ignore[arg-type]
+        _put_override(rest, tool, policy, ui, dry_run=dry_run)
+
+
+@permissions_group.command("allow")
+@click.argument("commands", nargs=-1, required=True)
+@_perm_tool_option()
+@click.option("--dry-run", is_flag=True, help="Print PUT body only.")
+def permissions_allow(commands: tuple[str, ...], tool: str, dry_run: bool) -> None:
+    """Append command first-words to allowed_commands (allowlist mode)."""
+    config = load_config()
+    ui = ConsoleUI()
+    with RestClient(config) as rest:
+        policy = merge_list_edit(
+            _current_override(rest, tool),
+            add={"allowed_commands": list(commands)},
+        )
+        _put_override(rest, tool, policy, ui, dry_run=dry_run)
+
+
+@permissions_group.command("allow-pattern")
+@click.argument("patterns", nargs=-1, required=True)
+@_perm_tool_option()
+@click.option("--dry-run", is_flag=True, help="Print PUT body only.")
+def permissions_allow_pattern(patterns: tuple[str, ...], tool: str, dry_run: bool) -> None:
+    """Append regexes to allowed_patterns (allowlist mode)."""
+    config = load_config()
+    ui = ConsoleUI()
+    with RestClient(config) as rest:
+        policy = merge_list_edit(
+            _current_override(rest, tool),
+            add={"allowed_patterns": list(patterns)},
+        )
+        _put_override(rest, tool, policy, ui, dry_run=dry_run)
+
+
+@permissions_group.command("deny-pattern")
+@click.argument("patterns", nargs=-1, required=True)
+@_perm_tool_option()
+@click.option("--dry-run", is_flag=True, help="Print PUT body only.")
+def permissions_deny_pattern(patterns: tuple[str, ...], tool: str, dry_run: bool) -> None:
+    """Append regexes to blocked_patterns (hard deny in all modes)."""
+    config = load_config()
+    ui = ConsoleUI()
+    with RestClient(config) as rest:
+        policy = merge_list_edit(
+            _current_override(rest, tool),
+            add={"blocked_patterns": list(patterns)},
+        )
+        _put_override(rest, tool, policy, ui, dry_run=dry_run)
+
+
+@permissions_group.command("remove")
+@click.argument("items", nargs=-1, required=True)
+@click.option(
+    "--from",
+    "from_list",
+    type=click.Choice(["commands", "allowed-patterns", "blocked-patterns"], case_sensitive=False),
+    default="commands",
+    show_default=True,
+    help="Which list to remove from.",
+)
+@_perm_tool_option()
+@click.option("--dry-run", is_flag=True, help="Print PUT body only.")
+def permissions_remove(items: tuple[str, ...], from_list: str, tool: str, dry_run: bool) -> None:
+    """Remove exact entries from an allow/block list."""
+    key_map = {
+        "commands": "allowed_commands",
+        "allowed-patterns": "allowed_patterns",
+        "blocked-patterns": "blocked_patterns",
+    }
+    key = key_map[from_list]
+    config = load_config()
+    ui = ConsoleUI()
+    with RestClient(config) as rest:
+        policy = merge_list_edit(
+            _current_override(rest, tool),
+            remove={key: list(items)},
+        )
+        _put_override(rest, tool, policy, ui, dry_run=dry_run)
+
+
+@permissions_group.command("reset")
+@_perm_tool_option()
+@click.option("--all", "reset_all", is_flag=True, help="Delete shell and ssh overrides.")
+@click.option("--yes", is_flag=True, help="Skip confirmation.")
+def permissions_reset(tool: str, reset_all: bool, yes: bool) -> None:
+    """Delete the runtime override (fall back to YAML baseline)."""
+    config = load_config()
+    ui = ConsoleUI()
+    target = None if reset_all else tool
+    label = "shell+ssh" if reset_all else tool
+    if not yes and not click.confirm(f"delete runtime override for {label}?", default=False):
+        ui.info("aborted")
+        return
+    with RestClient(config) as rest:
+        try:
+            result = rest.delete_command_overrides(target)
+        except httpx.HTTPStatusError as exc:
+            ui.error(f"DELETE failed: {exc}")
+            sys.exit(1)
+    ui.success(f"reset {label} (deleted={result.get('deleted', '?')})")
+
+
+@permissions_group.command("check")
+@click.argument("command")
+@_perm_tool_option()
+def permissions_check(command: str, tool: str) -> None:
+    """Validate a command against the effective policy (dry evaluate)."""
+    config = load_config()
+    ui = ConsoleUI()
+    with RestClient(config) as rest:
+        try:
+            verdict = rest.validate_command(tool, command)
+        except httpx.HTTPStatusError as exc:
+            ui.error(f"validate failed: {exc}")
+            sys.exit(1)
+    action = str(verdict.get("action", "?"))
+    reason = verdict.get("reason", "")
+    source = verdict.get("source", "")
+    if action == "allow":
+        ui.success(f"{action} ({source}): {reason}")
+    elif action == "deny":
+        ui.error(f"{action} ({source}): {reason}")
+        sys.exit(2)
+    else:
+        ui.warn(f"{action} ({source}): {reason}")
+
+
+@permissions_group.group("profile")
+def permissions_profile() -> None:
+    """Named permission presets (tight / open / user-saved)."""
+
+
+@permissions_profile.command("list")
+@click.option("--json", "as_json", is_flag=True)
+def permissions_profile_list(as_json: bool) -> None:
+    """List YAML builtins and user-saved profiles."""
+    config = load_config()
+    ui = ConsoleUI()
+    with RestClient(config) as rest:
+        try:
+            data = rest.list_permission_profiles()
+        except httpx.HTTPStatusError as exc:
+            ui.error(f"profiles API error: {exc} (need AgentForge with profile support)")
+            sys.exit(1)
+    if as_json:
+        ui.console.print_json(data=data)
+        return
+    active = data.get("active_profile_id")
+    if active:
+        ui.info(f"active: {active}")
+    for p in data.get("profiles") or []:
+        if not isinstance(p, dict):
+            continue
+        src = p.get("source") or ("yaml" if p.get("builtin") else "user")
+        desc = p.get("description") or ""
+        mark = " *" if p.get("id") == active else ""
+        ui.console.print(f"  [cyan]{p.get('id')}[/cyan]{mark}  [dim]({src})[/dim]  {desc}")
+
+
+@permissions_profile.command("show")
+@click.argument("profile_id")
+@click.option("--json", "as_json", is_flag=True)
+def permissions_profile_show(profile_id: str, as_json: bool) -> None:
+    """Show one profile document."""
+    config = load_config()
+    ui = ConsoleUI()
+    with RestClient(config) as rest:
+        try:
+            data = rest.get_permission_profile(profile_id)
+        except httpx.HTTPStatusError as exc:
+            ui.error(f"profile {profile_id!r}: {exc}")
+            sys.exit(1)
+    if as_json:
+        ui.console.print_json(data=data)
+        return
+    ui.info(f"{data.get('id')} ({data.get('source')})")
+    if data.get("description"):
+        ui.console.print(f"  {data['description']}")
+    if data.get("shell"):
+        ui.console.print(format_policy_block("shell:", data["shell"]))
+    if data.get("ssh"):
+        ui.console.print(format_policy_block("ssh:", data["ssh"]))
+
+
+@permissions_profile.command("apply")
+@click.argument("profile_id")
+def permissions_profile_apply(profile_id: str) -> None:
+    """Apply a profile as the live runtime override.
+
+    Special ids: ``__yaml__`` (config baseline only), ``__blank__`` (empty lists).
+    """
+    config = load_config()
+    ui = ConsoleUI()
+    with RestClient(config) as rest:
+        try:
+            result = rest.apply_permission_profile(profile_id)
+        except httpx.HTTPStatusError as exc:
+            ui.error(f"apply failed: {exc}")
+            sys.exit(1)
+    ui.success(f"applied profile {profile_id}")
+    applied = result.get("applied") or {}
+    if applied.get("description"):
+        ui.info(applied["description"])
+    # effective nested shape: effective.shell.effective.mode
+    shell_eff = ((result.get("effective") or {}).get("shell") or {}).get("effective") or {}
+    warn = mode_warning(str(shell_eff.get("mode", "confirm")))
+    if warn:
+        ui.warn(warn)
+    if shell_eff:
+        ui.console.print(format_policy_block("shell effective:", shell_eff))
+
+
+@permissions_profile.command("save")
+@click.argument("profile_id")
+@click.option("--description", default="", help="Human label.")
+@click.option(
+    "--from-current/--empty",
+    default=True,
+    help="Snapshot current runtime overrides (default) or require explicit empty shell.",
+)
+def permissions_profile_save(profile_id: str, description: str, from_current: bool) -> None:
+    """Save a user profile (from current overrides by default)."""
+    config = load_config()
+    ui = ConsoleUI()
+    body: dict = {
+        "description": description or f"felix save {profile_id}",
+        "from_current_overrides": from_current,
+    }
+    with RestClient(config) as rest:
+        try:
+            result = rest.save_permission_profile(profile_id, body)
+        except httpx.HTTPStatusError as exc:
+            ui.error(f"save failed: {exc}")
+            sys.exit(1)
+    ui.success(f"saved user profile {profile_id}")
+    if result.get("profile"):
+        ui.console.print_json(data=result["profile"])
+
+
+@permissions_profile.command("delete")
+@click.argument("profile_id")
+@click.option("--yes", is_flag=True, help="Skip confirmation.")
+def permissions_profile_delete(profile_id: str, yes: bool) -> None:
+    """Delete a user-saved profile (not YAML builtins)."""
+    config = load_config()
+    ui = ConsoleUI()
+    if not yes and not click.confirm(f"delete user profile {profile_id}?", default=False):
+        ui.info("aborted")
+        return
+    with RestClient(config) as rest:
+        try:
+            rest.delete_permission_profile(profile_id)
+        except httpx.HTTPStatusError as exc:
+            ui.error(f"delete failed: {exc}")
+            sys.exit(1)
+    ui.success(f"deleted {profile_id}")
 
 
 def _resolve_run(config: Config, run_id: str | None, ui: ConsoleUI):

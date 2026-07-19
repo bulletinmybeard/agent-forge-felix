@@ -2,12 +2,36 @@
 
 Felix can change live system state, so safety is layered. No single mechanism is trusted on its own:
 
-1. **Risk tiers** classify every action (client-side).
-2. **The confirm policy** decides approve / prompt / deny from the tier + mode flags (client-side).
-3. **AgentForge read-only gate** independently refuses mutating tools on a read-only run (AgentForge-side, fail-closed).
-4. **Egress gating** stops a diagnostic probe being used as an exfiltration channel.
-5. **Secret redaction** scrubs everything written to the run-store.
-6. **The skill firewall** vets acquired skills before they can influence a run.
+1. **AgentForge command permissions** (server, ≥ 0.12 overrides; ≥ 0.13 profiles) gate `shell` / `ssh` by allowlist, denylist, or confirm **before** CommandGuard.
+2. **AgentForge CommandGuard** classifies remaining shell/ssh commands and may prompt for destructive ops.
+3. **Risk tiers** classify every action (client-side), using `guard.threat`, tool name, and command text.
+4. **The confirm policy** decides approve / prompt / deny from the tier + mode flags (client-side).
+5. **AgentForge read-only gate** independently refuses mutating tools on a read-only run (AgentForge-side, fail-closed).
+6. **Egress gating** stops a diagnostic probe being used as an exfiltration channel.
+7. **Secret redaction** scrubs everything written to the run-store.
+8. **The skill firewall** vets acquired skills before they can influence a run.
+
+## AgentForge command permissions (shell / SSH)
+
+Felix runs many `shell` / `ssh` tool calls on the local SAQ worker. Those commands are filtered on the **server** by AgentForge's policy layer ([AgentForge SECURITY.md](https://github.com/bulletinmybeard/agent-forge/blob/master/docs/SECURITY.md)):
+
+| Mode | Effect on Felix runs |
+|------|----------------------|
+| `confirm` (default) | Blocked patterns hard-denied; other commands go through CommandGuard + Felix confirm policy |
+| `allowlist` | Only listed commands/patterns run; everything else is refused **without** a confirm dialog |
+| `denylist` | Listed patterns refused; other commands run without CommandGuard confirm |
+
+Configure via:
+
+- AgentForge `config.yaml` (`tools.shell.permissions` / `tools.ssh.permissions`) — YAML baseline
+- Runtime overrides: REST `/api/permissions/commands/*`, Web UI **Command Permissions** modal, or  
+  **`felix permissions`** (`show`, `set-mode`, `allow`, `deny-pattern`, `reset`, `check`, …)
+- **Named profiles** (`tools.command_permission_profiles` + user SQLite):  
+  `felix permissions profile apply tight|open|…` or Web UI **Apply profile…**
+
+Hard policy denials show up as tool errors (e.g. `Refused: command blocked by policy…`), not as `confirm.request`. Felix's client gate never sees them.
+
+`felix doctor` checks that `/api/permissions/commands` is available (requires AgentForge **≥ 0.12.0**; full Felix **0.3.0** features including profiles need **≥ 0.13.0**) and prints the effective shell/ssh modes.
 
 ## Risk tiers
 

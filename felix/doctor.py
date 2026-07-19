@@ -66,9 +66,43 @@ def _check_rest(config: Config) -> list[Check]:
             checks.append(Check("SAQ worker present", worker is not None, worker or "no worker service found"))
         except Exception as exc:  # noqa: BLE001
             checks.append(Check("SAQ worker present", False, f"/api/services error: {exc}"))
+
+        checks.append(_check_command_permissions(rest))
     finally:
         rest.close()
     return checks
+
+
+def _check_command_permissions(rest: RestClient) -> Check:
+    """Verify the server exposes command policy (critical for shell-heavy Felix runs)."""
+    try:
+        data = rest.command_permissions()
+    except Exception as exc:  # noqa: BLE001
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 404:
+            return Check(
+                "command permissions API",
+                False,
+                "missing — need AgentForge ≥ 0.12.0 (/api/permissions/commands)",
+            )
+        return Check("command permissions API", False, f"/api/permissions/commands error: {exc}")
+
+    if not isinstance(data, dict):
+        return Check("command permissions API", False, f"unexpected payload: {type(data).__name__}")
+
+    parts: list[str] = []
+    for tool in ("shell", "ssh"):
+        bundle = data.get(tool) if isinstance(data.get(tool), dict) else {}
+        effective = bundle.get("effective") if isinstance(bundle.get("effective"), dict) else {}
+        mode = effective.get("mode") or "confirm"
+        override = bundle.get("override")
+        tag = f"{tool}={mode}"
+        if override is not None:
+            tag += "+override"
+        parts.append(tag)
+
+    detail = ", ".join(parts) if parts else "ok"
+    return Check("command permissions API", True, detail)
 
 
 def _find_worker(services: object) -> str | None:

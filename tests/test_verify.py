@@ -143,6 +143,16 @@ def test_read_only_is_proposed():
     assert decide(s, s, applied=False, read_only=True).verdict == Verdict.PROPOSED
 
 
+def test_writable_diagnose_only_is_proposed_not_fixed():
+    # --apply run that only probed (no mutation): must not claim Fixed via the
+    # "edit-level verification" fallback when applied_any was falsely true.
+    before = extract_signals([_obs("/ 85% used")])
+    after = extract_signals([_obs("/ 85% used")])
+    result = decide(before, after, applied=False)
+    assert result.verdict == Verdict.PROPOSED
+    assert "no state-changing" in result.rationale[0]
+
+
 def test_dry_run_is_not_applied():
     s = extract_signals([])
     assert decide(s, s, applied=False, dry_run=True).verdict == Verdict.NOT_APPLIED

@@ -5,7 +5,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![Poetry](https://img.shields.io/endpoint?url=https://python-poetry.org/badge/v0.json)](https://python-poetry.org/)
-[![Requires AgentForge](https://img.shields.io/badge/requires-AgentForge-blueviolet)](https://github.com/bulletinmybeard/agent-forge)
+[![Requires AgentForge](https://img.shields.io/badge/requires-AgentForge%200.13.0%2B-blueviolet)](https://github.com/bulletinmybeard/agent-forge/releases/tag/v0.13.0)
 
 <!-- prettier-ignore -->
 > [!NOTE]
@@ -29,9 +29,12 @@ Felix diagnoses a broken thing, finds the root cause from evidence, proposes a f
 
 Felix is a thin client over [AgentForge](https://github.com/bulletinmybeard/agent-forge):
 
-- **Brain**: the remote AgentForge web service runs the agent loop, classification, investigation/synthesis, and the safety guard.
+- **Brain**: the remote AgentForge web service runs the agent loop, classification, investigation/synthesis, **shell/SSH command permissions**, and the safety guard (CommandGuard + confirms).
 - **Executor**: AgentForge dispatches tool execution to a local SAQ worker (launchd) on the MacBook. That is why Felix can diagnose the local box.
 - **Felix client**: drives a run over the `/ws/chat` WebSocket, renders the live event stream, enforces a risk-tiered confirm policy, runs the mandatory before/after verification, and persists a local run-store + rollback ledger + report under `~/.felix/runs/<timestamp>/`.
+
+> [!IMPORTANT]
+> Felix needs [AgentForge **v0.13.0**](https://github.com/bulletinmybeard/agent-forge/releases/tag/v0.13.0) or newer. That stack provides server-side **command permissions** (overrides from 0.12) and **named profiles** (0.13) for every `shell` / `ssh` tool call — the bulk of Felix diagnostics and repairs. Older servers still run, but `felix doctor` will flag a missing permissions API, and you lose allowlist/denylist and profile control.
 
 ## Modes
 
@@ -42,6 +45,7 @@ Felix is a thin client over [AgentForge](https://github.com/bulletinmybeard/agen
 | `--apply` | Auto-apply read-only + low-risk fixes. |
 | `--yes` | Auto-confirm medium-risk (high-risk still prompts). |
 | `--deep` | Deeper investigation. |
+| `-v` / `-vv` | More terminal detail (skill ids, tool outputs at `-vv`, …). |
 
 Safety tiers:
 
@@ -53,11 +57,17 @@ Safety tiers:
 ## Subcommands
 
 ```bash
-felix doctor              # check API, WebSocket, SAQ worker, @felix agent
+felix doctor              # check API, WebSocket, SAQ worker, @felix agent, permissions API
 felix last                # show the latest run's report
 felix explain [RUN_ID]    # root cause + evidence
 felix undo [RUN_ID]       # revert file changes via revert_file
 felix replay [RUN_ID]     # replay commands through the dry-run pipeline
+felix permissions show    # shell/SSH policy (YAML + runtime override + effective)
+felix permissions set-mode allowlist --tool shell
+felix permissions allow ls df docker du --tool shell
+felix permissions check 'rm -rf /tmp/x'
+felix permissions profile apply tight   # named preset (lab allowlist)
+felix permissions profile apply open    # repair / confirm mode
 ```
 
 ## Skill fleet
@@ -93,7 +103,7 @@ cp config.example.yaml ~/.felix/config.yaml   # edit api_base / api_key
 poetry run felix doctor
 ```
 
-Requires a running AgentForge stack that includes the `@felix` agent (baked into the release). See [docs/server-setup.md](docs/server-setup.md). Run `felix doctor` to verify connectivity and local settings.
+Requires a running AgentForge stack **≥ [v0.13.0](https://github.com/bulletinmybeard/agent-forge/releases/tag/v0.13.0)** that includes the `@felix` agent (baked into the release). See [docs/server-setup.md](docs/server-setup.md). Run `felix doctor` to verify connectivity, the permissions API, and local settings.
 
 ## Documentation
 

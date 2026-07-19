@@ -151,8 +151,10 @@ def decide(
 ) -> VerificationResult:
     if dry_run:
         return VerificationResult(Verdict.NOT_APPLIED, ["dry-run: no changes executed"], before, after)
-    if read_only or not applied:
+    if read_only:
         return VerificationResult(Verdict.PROPOSED, ["read-only: fix proposed, not applied"], before, after)
+    if not applied:
+        return VerificationResult(Verdict.PROPOSED, ["no state-changing action applied"], before, after)
 
     improvements: list[str] = []
     regressions: list[str] = []

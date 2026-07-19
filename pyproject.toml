@@ -1,6 +1,6 @@
 [project]
 name = "felix"
-version = "0.2.1"
+version = "0.3.0"
 description = "Autonomous local diagnostic-repair agent: diagnose. fix. verify."
 authors = [{ name = "Robin Schulz" }]
 readme = "README.md"

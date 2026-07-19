@@ -44,7 +44,19 @@ def trace_to_markdown(trace: dict[str, Any]) -> str:
 def _format_result(step_id: str, result: dict[str, Any]) -> str:
     if step_id == "tools":
         tools = result.get("tools", [])
-        return f"- {len(tools)} tools: {', '.join(tools)}" if tools else "- (none)"
+        if not tools:
+            return "- (none)"
+        # Keep the plan readable; full list is still in plan.md on disk.
+        head = tools[:24]
+        more = len(tools) - len(head)
+        listing = ", ".join(str(t) for t in head)
+        if more > 0:
+            listing += f", … (+{more} more)"
+        source = result.get("source")
+        line = f"- {len(tools)} tools: {listing}"
+        if source:
+            line += f"\n- source: {source}"
+        return line
     if step_id == "skills":
         skills = result.get("skills", [])
         if not skills:

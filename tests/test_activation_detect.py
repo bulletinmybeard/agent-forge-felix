@@ -28,6 +28,15 @@ def test_read_commands_not_activation():
         "cat /opt/docker-container-1/server.py",
         "ls -la /opt/docker-container-1",
         "grep -n mcp.app server.py",
+        "df -h",
+        "du -sh ~/Library/Caches/* | sort -hr | head -20",
+        # Path substrings that used to false-positive on bare `service\\b`
+        # (Chrome Service Worker cache) and flip applied_any → false Fixed.
+        # Synthetic paths only — never use a real username/home path in fixtures.
+        "du -sh /Users/example/Library/Application\\ Support/Google/Chrome/Default/Service\\ Worker/CacheStorage/abc 2>/dev/null",
+        "du -sh '/Users/example/Library/Application Support/Google/Chrome/Default/Service Worker/CacheStorage/x'",
+        "strings /Users/example/Library/Application Support/Google/Chrome/Default/Service Worker/foo | head -20",
+        "docker system df -v | head -50",
         "",
     ]:
         assert not _is_activation_command(cmd), f"false activation: {cmd}"

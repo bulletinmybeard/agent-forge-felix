@@ -9,7 +9,7 @@ Three tiers design:
 %%{init: {"flowchart": {"nodeSpacing": 60, "rankSpacing": 90}}}%%
 flowchart TB
     client["Felix client (this repo)<br/>- confirm policy<br/>- before/after verification<br/>- run-store + rollback + report"]
-    brain["agent-forge web service (BRAIN)<br/>- @felix agent loop<br/>- classification<br/>- command guard<br/>- skill injection"]
+    brain["agent-forge web service (BRAIN)<br/>- @felix agent loop<br/>- classification<br/>- command permissions + command guard<br/>- skill injection"]
     worker["SAQ worker (EXECUTOR)<br/>runs tools on the local machine"]
 
     client <-->|"/ws/chat (WS), /api/* (REST)"| brain
@@ -27,7 +27,7 @@ flowchart TB
 
 ## The three tiers
 
-- **Brain**: the remote agent-forge web service. It runs the agent loop for the `@felix` custom agent: classification, investigation/synthesis, and the server-side `CommandGuard` that gates destructive operations.
+- **Brain**: the remote agent-forge web service. It runs the agent loop for the `@felix` custom agent: classification, investigation/synthesis, **command permissions** (shell/SSH allowlist/denylist/confirm + named profiles, AgentForge ≥ 0.13), and the server-side `CommandGuard` that gates remaining destructive operations.
 - **Executor**: agent-forge dispatches each tool call to a local **SAQ worker** (a launchd job on macOS). This is why Felix, despite talking to AgentForge, can diagnose and repair the *local* box.
 - **Felix client** (this repo): drives the run over the `/ws/chat` WebSocket, renders the live event stream, enforces a risk-tiered confirm policy, runs the mandatory before/after verification, and persists a local run-store + rollback + report.
 
